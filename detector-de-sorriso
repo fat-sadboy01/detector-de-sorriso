@@ -1,0 +1,220 @@
+import numpy as np  # Importa a biblioteca numpy e a renomeia para np
+import argparse  # Importa a biblioteca argparse para análise de linha de comando
+import cv2 as cv  # Importa a biblioteca OpenCV e a renomeia para cv
+
+# Define os arquivos de configuração e os limiares de confiança
+LABELS_FILE = "coco.names"
+CONFIG_FILE = "yolov4.cfg"
+WEIGHTS_FILE = "yolov4.weights"
+CONFIDENCE_THRESHOLD = 0.3
+
+# Lê o arquivo de rótulos e cria uma lista de rótulos
+LABELS = open(LABELS_FILE).read().strip().split("\n")
+
+# Define a semente para geração de números aleatórios
+np.random.seed(4)
+
+# Gera cores aleatórias para cada rótulo
+COLORS = np.random.randint(0, 255, size=(len(LABELS), 3), dtype="uint8")
+
+# Carrega a rede YOLO a partir dos arquivos de configuração e pesos
+net = cv.dnn.readNetFromDarknet(CONFIG_FILE, WEIGHTS_FILE)
+
+# Função para desenhar caixas delimitadoras em torno dos objetos detectados
+def drawBoxes(image, layerOutputs, H, W):
+    # Inicializa listas para caixas delimitadoras, confianças e IDs de classe
+    boxes = []
+    confidences = []
+    classIDs = []
+
+    # Itera sobre as saídas de cada camada
+    for output in layerOutputs:
+        for detection in output:
+            # Extrai as pontuações de confiança e o ID da classe
+            scores = detection[5:]
+            classID = np.argmax(scores)
+            confidence = scores[classID]
+
+            # Verifica se a confiança é maior que o limiar de confiança
+            if confidence > CONFIDENCE_THRESHOLD:
+                # Calcula as coordenadas da caixa delimitadora
+                box = detection[0:4] * np.array([W, H, W, H])
+                (centerX, centerY, width, height) = box.astype("int")
+                x = int(centerX - (width / 2))
+                y = int(centerY - (height / 2))
+
+                # Adiciona as informações da caixa delimitadora à lista
+                boxes.append([x, y, int(width), int(height)])
+                confidences.append(float(confidence))
+                classIDs.append(classID)
+
+    # Aplica supressão não máxima para remover caixas delimitadoras sobrepostas
+    idxs = cv.dnn.NMSBoxes(boxes, confidences, CONFIDENCE_THRESHOLD, CONFIDENCE_THRESHOLD)
+
+    # Desenha as caixas delimitadoras e rótulos na imagem
+    if len(idxs) > 0:
+        for i in idxs.flatten():
+            (x, y) = (boxes[i][0], boxes[i][1])
+            (w, h) = (boxes[i][2], boxes[i][3])
+            color = [int(c) for c in COLORS[classIDs[i]]]
+            cv.rectangle(image, (x, y), (x + w, y + h), color, 2)
+            text = "{}: {:.4f}".format(LABELS[classIDs[i]], confidences[i])
+            cv.putText(image, text, (x, y - 5), cv.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+
+    return image
+
+# Função para detectar sorrisos em uma região de interesse (ROI)
+def detectSmiles(roi_color):
+    # Converte a ROI para tons de cinza
+    gray = cv.cvtColor(roi_color, cv.COLOR_BGR2GRAY)
+    # Detecta sorrisos na ROI
+    smiles = smile_cascade.detectMultiScale(gray, scaleFactor=1.8, minNeighbors=20)
+    for (sx, sy, sw, sh) in smiles:
+        # Desenha um retângulo em torno do sorriso
+        cv.rectangle(roi_color, (sx, sy), (sx + sw, sy + sh), (0, 255, 0), 2)
+        # Calcula a porcentagem da área do sorriso em relação à área total da ROI
+        smile_area = sw * sh
+        total_area = roi_color.shape[0] * roi_color.shape[1]
+        smile_percentage = (smile_area / total_area) * 100
+        # Adiciona um texto indicando a porcentagem do sorriso na ROI
+        cv.putText(roi_color, f'smile: {smile_percentage:.2f}%', (sx, sy - 10), cv.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
+        # Calcula e adiciona um texto indicando a pontuação de sorriso
+        smile_score = calculateSmileScore(roi_color, (sx, sy, sw, sh))
+        cv.putText(roi_color, f'smile score: {smile_score:.2f}', (sx, sy - 30), cv.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
+
+# Função para calcular a pontuação de sorriso com base na forma e abertura da boca
+def calculateSmileScore(roi_color, smile_region):
+    (sx, sy, sw, sh) = smile_region
+    aspect_ratio = sw / sh  # Calcula a razão entre largura e altura
+    mouth_openness = detectMouthOpenness(roi_color, smile_region)  # Calcula a abertura da boca
+    smile_score = aspect_ratio * mouth_openness  # Combina os fatores para obter a pontuação
+    return smile_score
+
+# Função para detectar a abertura da boca
+def detectMouthOpenness(roi_color, smile_region):
+    (sx, sy, sw, sh) = smile_region
+    # Calcula as coordenadas da boca
+    mouth_x1 = sx
+    mouth_x2 = sx + sw
+    mouth_y1 = int(sy + 0.6 * sh)
+    mouth_y2 = sy + sh
+    # Extrai a região da boca
+    mouth_roi = roi_color[mouth_y1:mouth_y2, mouth_x1:mouth_x2]
+    # Converte a região da boca para tons de cinza
+    mouth_gray = cv.cvtColor(mouth_roi, cv.COLOR_BGR2GRAY)
+    # Calcula a média da intensidade dos pixels na região da boca
+    mouth_intensity = np.mean(mouth_gray)
+    # Normaliza a intensidade pela intensidade máxima possível
+    mouth_openness = mouth_intensity / 255.0
+    return mouth_openness
+
+# Função para detectar os olhos em uma ROI em tons de cinza e desenhar retângulos ao redor deles
+def detectEyes(roi_gray, roi_color):
+    eyes = eye_cascade.detectMultiScale(roi_gray)
+    for (ex, ey, ew, eh) in eyes:
+        cv.rectangle(roi_color, (ex, ey), (ex + ew, ey + eh), (255, 255, 0), 2)
+        # Calcula a porcentagem da área dos olhos em relação à área total da ROI
+        eye_area = ew * eh
+        total_area = roi_color.shape[0] * roi_color.shape[1]
+        eye_percentage = (eye_area / total_area) * 100
+        # Adiciona um texto indicando a porcentagem dos olhos na ROI
+        cv.putText(roi_color, f'eyes: {eye_percentage:.2f}%', (ex, ey - 10), cv.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 0), 2)
+
+# Função para detectar objetos em uma imagem
+def detectObjectsInImage(imagePath):
+    # Lê a imagem e obtém suas dimensões
+    image = cv.imread(imagePath)
+    (H, W) = image.shape[:2]
+    # Obtém os nomes das camadas da rede YOLO
+    ln = net.getLayerNames()
+    ln = [ln[i - 1] for i in net.getUnconnectedOutLayers()]
+    # Pré-processa a imagem e obtém as saídas das camadas
+    blob = cv.dnn.blobFromImage(image, 1 / 255.0, (416, 416), swapRB=True, crop=False)
+    net.setInput(blob)
+    layerOutputs = net.forward(ln)
+    # Desenha caixas delimitadoras e rótulos na imagem
+    image_with_boxes = drawBoxes(image, layerOutputs, H, W)
+    # Exibe a imagem com objetos detectados
+    cv.imshow("Imagem com Objetos Detectados", image_with_boxes)
+    cv.waitKey(0)
+    cv.destroyAllWindows()
+
+# Função para detectar objetos em um vídeo
+def detectObjectsInVideo(videoPath=None, camera_index=None, resize_factor=1.0):
+    # Inicializa a captura de vídeo a partir do arquivo de vídeo ou da câmera
+    if videoPath:
+        cap = cv.VideoCapture(videoPath)
+    elif camera_index is not None:
+        cap = cv.VideoCapture(camera_index)
+    else:
+        print("Por favor, forneça o caminho para um vídeo usando -v ou o índice da câmera usando -c.")
+        return
+    
+    # Loop principal para processar cada frame do vídeo
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        
+        # Redimensiona o frame, se necessário
+        if resize_factor != 1.0:
+            frame = cv.resize(frame, None, fx=resize_factor, fy=resize_factor)
+
+        # Obtém as dimensões do frame
+        (H, W) = frame.shape[:2]
+        # Obtém os nomes das camadas da rede YOLO
+        ln = net.getLayerNames()
+        ln = [ln[i - 1] for i in net.getUnconnectedOutLayers()]
+        # Pré-processa o frame e obtém as saídas das camadas
+        blob = cv.dnn.blobFromImage(frame, 1 / 255.0, (416, 416), swapRB=True, crop=False)
+        net.setInput(blob)
+        layerOutputs = net.forward(ln)
+
+        # Detecta faces no frame usando o classificador em cascata
+        gray = cv.cvtColor(frame, cv.COLOR_BGR2GRAY)
+        faces = face_cascade.detectMultiScale(gray, 1.3, 5)
+        for (x, y, w, h) in faces:
+            roi_gray = gray[y:y+h, x:x+w]
+            roi_color = frame[y:y+h, x:x+w]
+            detectEyes(roi_gray, roi_color)
+            detectSmiles(roi_color)
+            cv.rectangle(frame, (x, y), (x + w, y + h), (255, 0, 0), 2)
+            cv.putText(frame, 'face', (x, y - 10), cv.FONT_HERSHEY_SIMPLEX, 0.9, (255, 0, 0), 2)
+
+        # Desenha caixas delimitadoras e rótulos no frame
+        image_with_boxes = drawBoxes(frame, layerOutputs, H, W)
+        # Exibe o vídeo com objetos detectados
+        cv.imshow("Vídeo com Objetos Detectados", image_with_boxes)
+
+        # Aguarda pela tecla de saída (ESC)
+        if cv.waitKey(1) & 0xFF == 27:
+          break
+
+    # Libera os recursos e fecha as janelas
+    cap.release()
+    cv.destroyAllWindows()
+
+# Verifica se o script está sendo executado como programa principal
+if __name__ == "__main__":
+    # Analisa os argumentos da linha de comando
+    ap = argparse.ArgumentParser()
+    ap.add_argument("-i", "--image", help="Caminho para a imagem")
+    ap.add_argument("-v", "--video", help="Caminho para o vídeo")
+    ap.add_argument("-c", "--camera", type=int, default=0, help="Índice da câmera (0 para webcam padrão)")
+    ap.add_argument("-r", "--resize", type=float, default=1.0, help="Fator de redimensionamento do frame (0-1 para reduzir)")
+    args = vars(ap.parse_args())
+
+    # Inicializa os classificadores em cascata para detecção de rosto, olho e sorriso
+    face_cascade = cv.CascadeClassifier(cv.data.haarcascades + 'haarcascade_frontalface_default.xml')
+    eye_cascade = cv.CascadeClassifier(cv.data.haarcascades + 'haarcascade_eye.xml')
+    smile_cascade = cv.CascadeClassifier(cv.data.haarcascades + 'haarcascade_smile.xml')
+
+    # Executa a detecção de objetos com base nos argumentos fornecidos
+    if args["image"]:
+        detectObjectsInImage(args["image"])
+    elif args["video"]:
+        detectObjectsInVideo(videoPath=args["video"], resize_factor=args["resize"])
+    elif args["camera"] is not None:
+        detectObjectsInVideo(camera_index=args["camera"], resize_factor=args["resize"])
+    else:
+        print("Por favor, forneça o caminho para uma imagem usando -i, para um vídeo usando -v, ou o índice da câmera usando -c.")
